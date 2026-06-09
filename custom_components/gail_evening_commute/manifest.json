@@ -1,0 +1,13 @@
+{
+  "domain": "gail_evening_commute",
+  "name": "Gail Evening Commute",
+  "version": "1.0.0",
+  "description": "Gail evening commute: Hammersmith→Paddington (District/Circle) → Paddington→Twyford (GWR/Elizabeth line).",
+  "documentation": "https://github.com/vaughnlfisher/gail-evening-commute",
+  "issue_tracker": "https://github.com/vaughnlfisher/gail-evening-commute/issues",
+  "dependencies": [],
+  "codeowners": ["@vaughnlfisher"],
+  "requirements": [],
+  "iot_class": "cloud_polling",
+  "config_flow": true
+}
