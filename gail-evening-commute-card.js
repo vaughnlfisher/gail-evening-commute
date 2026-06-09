@@ -189,7 +189,6 @@ class EveningCommuteMultilegCard extends HTMLElement {
     const lastUpdated = s?.last_updated
       ? new Date(s.last_updated).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
       : null;
-    const fInt = s?.paddington_interchange_mins ?? 5;
     const pInt = s?.paddington_interchange_mins ?? 8;
 
     const hdr = cfg.show_header
@@ -209,34 +208,23 @@ class EveningCommuteMultilegCard extends HTMLElement {
         const totalTxt = (t.total_transit_mins !== null && t.total_transit_mins !== undefined)
           ? `<span class="total-time">\u23f1 ${t.total_transit_mins} min total</span>` : '';
         const caret = `<span class="caret${collapsed ? '' : ' open'}">\u25bc</span>`;
-        const leg1bar = `<div class="leg-bar leg1-toggle" data-idx="${idx}"><span class="leg-pill p1">LEG 1</span>City Thameslink \u2192 Farringdon \u00b7 Thameslink ${totalTxt}${caret}</div>`;
-        const leg1 = leg1bar + this._row(t, 'row');
+
+        // Leg 1: HMM → PAD (TfL District/Circle — static estimate)
+        const hmmDep = t.hmm_dep_est || '??:??';
+        const leg1bar = `<div class="leg-bar leg1-toggle" data-idx="${idx}"><span class="leg-pill p1">LEG 1</span>Hammersmith \u2192 Paddington \u00b7 District / Circle ${totalTxt}${caret}</div>`;
+        const leg1row = `<div class="row"><span class="dep">${hmmDep}</span><span class="dest">Paddington</span><span style="font-size:.72em;color:#888;margin-left:6px">TfL \u2014 est. ${pInt}m journey</span></div>`;
+        const leg1 = leg1bar + leg1row;
 
         if (collapsed) {
           return `<div class="train-block">${leg1}</div>`;
         }
 
-        const leg2list = Array.isArray(t.leg2) ? t.leg2 : [];
-        let leg2html;
-        if (!leg2list.length) {
-          leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${fInt}m interchange<span class="line"></span></div><div class="l2-wrap"><div class="none">No onward Elizabeth line connection yet</div></div>`;
-        } else {
-          leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${fInt}m interchange at Farringdon<span class="line"></span></div>`
-            + `<div class="leg-bar"><span class="leg-pill p2">LEG 2</span>Farringdon \u2192 Paddington \u00b7 Elizabeth line</div>`
-            + `<div class="l2-wrap">` + leg2list.map(l2 => {
-                const l2row = this._row(l2, 'l2-row');
-                const leg3list = Array.isArray(l2.leg3) ? l2.leg3 : [];
-                let leg3html;
-                if (!leg3list.length) {
-                  leg3html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${pInt}m at Paddington<span class="line"></span></div><div class="l3-wrap"><div class="none">No onward Twyford service yet</div></div>`;
-                } else {
-                  leg3html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${pInt}m interchange at Paddington<span class="line"></span></div>`
-                    + `<div class="leg-bar"><span class="leg-pill p3">LEG 3</span>Paddington \u2192 Twyford \u00b7 GWR / Elizabeth</div>`
-                    + `<div class="l3-wrap">` + leg3list.map(l3 => this._row(l3, 'l3-row', {carrier: true})).join('') + `</div>`;
-                }
-                return l2row + leg3html;
-              }).join('') + `</div>`;
-        }
+        // Leg 2: PAD → TWY (live NR)
+        const padDep = t.pad_dep || t.time;
+        const leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${pInt}m interchange at Paddington<span class="line"></span></div>`
+          + `<div class="leg-bar"><span class="leg-pill p2">LEG 2</span>Paddington \u2192 Twyford \u00b7 ${t.operator || 'GWR / Elizabeth'}</div>`
+          + `<div class="l2-wrap">` + this._row(t, 'l2-row') + `</div>`;
+
         return `<div class="train-block">${leg1}${leg2html}</div>`;
       }).join('');
     }

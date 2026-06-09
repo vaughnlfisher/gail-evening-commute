@@ -320,66 +320,87 @@ class GailEveningCoordinator(DataUpdateCoordinator):
         try:
             now = datetime.now().astimezone()
 
-            leg1_services = await self._fetch_leg(LEG1_FROM, LEG1_TO)
-            leg2_services = await self._fetch_leg(LEG2_FROM, LEG2_TO)
+            # leg1 (HMM→PAD) is District/Circle TfL — not in Darwin.
+            # Gail catches a District/Circle from Hammersmith independently.
+            # We show PAD→TWY trains directly; HMM→PAD is ~15 min + 8 min interchange = 23 min offset.
+            HMM_TO_PAD_MINS = 15
+            PAD_BOARD_OFFSET = HMM_TO_PAD_MINS + PADDINGTON_INTERCHANGE_MINS  # 23 min
 
-            # Leg 1: Hammersmith → Paddington (District/Circle)
-            leg1 = _upcoming(leg1_services, now, PADDINGTON_TERMINI)
-            if not leg1:
-                leg1 = _upcoming(leg1_services, now)
+            # Fetch PAD departures towards Twyford (GWR westbound + Elizabeth line westbound)
+            pad_twy_services = await self._fetch_leg("PAD", "TWY")
+            pad_eal_services = await self._fetch_leg("PAD", "EAL")
 
+            # Combine and deduplicate by std
+            all_pad_services = {s.get("std"): s for s in (pad_twy_services + pad_eal_services)
+                                 if s.get("std")}.values()
+
+            # Filter to services that call at Twyford
+            twy_services = []
+            for svc in all_pad_services:
+                if not _is_to(svc, TWYFORD_TERMINI):
+                    continue
+                dt = _svc_time(svc)
+                if not dt:
+                    continue
+                status, delay = _svc_status(svc)
+                _, transit = _arrival_at(svc, ["twyford"], dt)
+                if transit is None:
+                    transit = 25
+                twy_services.append({
+                    "dt": dt, "time": dt.strftime("%H:%M"),
+                    "destination": _svc_dest(svc),
+                    "status": status, "delay_minutes": delay,
+                    "platform": svc.get("platform"),
+                    "operator": svc.get("operator"),
+                    "operator_code": svc.get("operatorCode"),
+                    "transit_mins": transit,
+                    "_svc": svc,
+                })
+            twy_services.sort(key=lambda x: x["dt"])
+
+            # Build trains: each PAD→TWY departure becomes a "train"
+            # HMM→PAD leg shown as static note (TfL District/Circle, ~15 min)
             trains = []
-            for l1 in leg1[:NUM_TRAINS]:
-                l1_arr, l1_transit = _arrival_at(l1["_svc"], ["paddington"], l1["dt"])
-                if l1_arr is None:
-                    l1_arr = l1["dt"] + timedelta(minutes=15)
-                    l1_transit = 15
+            for svc in twy_services[:NUM_TRAINS]:
+                pad_arr_est = svc["dt"] - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS)
+                hmm_dep_est = pad_arr_est - timedelta(minutes=HMM_TO_PAD_MINS)
+                total_transit = HMM_TO_PAD_MINS + PADDINGTON_INTERCHANGE_MINS + svc["transit_mins"]
 
-                board2 = l1_arr + timedelta(minutes=PADDINGTON_INTERCHANGE_MINS)
-                leg2_opts = []
-                for l2 in _upcoming(leg2_services, board2, TWYFORD_TERMINI):
-                    _, l2_transit = _arrival_at(l2["_svc"], ["twyford"], l2["dt"])
-                    if l2_transit is None:
-                        l2_transit = 25
-                    wait2 = max(0, round((l2["dt"] - l1_arr).total_seconds() / 60))
-                    total = (l1_transit or 0) + (l2_transit or 0)
-                    leg2_opts.append({
-                        "time": l2["time"],
-                        "destination": l2["destination"],
-                        "status": l2["status"],
-                        "delay_minutes": l2["delay_minutes"],
-                        "platform": l2["platform"],
-                        "operator": l2["operator"],
-                        "operator_code": l2["operator_code"],
-                        "wait_mins": wait2,
-                        "transit_mins": l2_transit,
-                        "total_transit_mins": total,
-                    })
-                    if len(leg2_opts) >= MAX_LEG2:
-                        break
-
-                total_transit = leg2_opts[0].get("total_transit_mins") if leg2_opts else l1_transit
+                leg1_opts = [{
+                    "time": hmm_dep_est.strftime("%H:%M"),
+                    "destination": "Paddington",
+                    "status": "TfL",
+                    "delay_minutes": None,
+                    "platform": None,
+                    "operator": "District / Circle line",
+                    "operator_code": "LU",
+                    "transit_mins": HMM_TO_PAD_MINS,
+                    "tfl_static": True,
+                }]
 
                 trains.append({
-                    "time": l1["time"],
-                    "destination": l1["destination"],
-                    "status": l1["status"],
-                    "delay_minutes": l1["delay_minutes"],
-                    "platform": l1["platform"],
-                    "operator": l1["operator"],
-                    "operator_code": l1["operator_code"],
-                    "transit_mins": l1_transit,
+                    "time": svc["time"],
+                    "pad_dep": svc["time"],
+                    "destination": svc["destination"],
+                    "status": svc["status"],
+                    "delay_minutes": svc["delay_minutes"],
+                    "platform": svc["platform"],
+                    "operator": svc["operator"],
+                    "operator_code": svc["operator_code"],
+                    "transit_mins": svc["transit_mins"],
                     "total_transit_mins": total_transit,
-                    "leg2": leg2_opts,
+                    "hmm_dep_est": hmm_dep_est.strftime("%H:%M"),
+                    "leg1": leg1_opts,
                 })
 
             data = {
                 "summary": {
-                    "state": trains[0]["time"] if trains else "No service",
-                    "leg1_from": LEG1_FROM,
-                    "leg1_to": LEG1_TO,
-                    "leg2_to": LEG2_TO,
+                    "state": trains[0]["hmm_dep_est"] if trains else "No service",
+                    "leg1_from": "HMM",
+                    "leg1_to": "PAD",
+                    "leg2_to": "TWY",
                     "paddington_interchange_mins": PADDINGTON_INTERCHANGE_MINS,
+                    "hmm_to_pad_mins": HMM_TO_PAD_MINS,
                     "trains": trains,
                     "last_updated": now.isoformat(),
                     "history": self._history,
@@ -387,7 +408,7 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                 "history": self._history,
             }
             for i, t in enumerate(trains, 1):
-                data[f"train_{i}"] = {"state": t["time"], **t}
+                data[f"train_{i}"] = {"state": t["hmm_dep_est"], **t}
             return data
 
         except Exception as err:
