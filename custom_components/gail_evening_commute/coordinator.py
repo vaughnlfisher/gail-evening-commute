@@ -21,6 +21,7 @@ from .const import (
     PADDINGTON_INTERCHANGE_MINS,
     HSP_URL, HSP_USERNAME, HSP_PASSWORD, HSP_LEGS, HSP_FROM_TIME, HSP_TO_TIME,
     LEG1_HISTORY_PROXY_ENTITY,
+    TFL_APP_KEY, TFL_JOURNEY_URL, NAPTAN_HAMMERSMITH, NAPTAN_PADDINGTON,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -229,6 +230,47 @@ class GailEveningCoordinator(DataUpdateCoordinator):
         out.sort(key=lambda x: x["dt"])
         return out
 
+
+    async def _fetch_journey(self, frm, to, depart_dt):
+        """TfL Journey Planner: real timetabled tube connections from depart_dt onward."""
+        url = TFL_JOURNEY_URL.format(frm=frm, to=to)
+        params = {
+            "mode": "tube",
+            "timeIs": "Departing",
+            "date": depart_dt.strftime("%Y%m%d"),
+            "time": depart_dt.strftime("%H%M"),
+            "app_key": TFL_APP_KEY,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params, headers={"Accept": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning("TfL Journey %s->%s HTTP %s", frm, to, resp.status)
+                        return []
+                    data = await resp.json(content_type=None)
+        except Exception as err:
+            _LOGGER.warning("TfL Journey %s->%s error: %s", frm, to, err)
+            return []
+
+        out = []
+        for jn in (data.get("journeys") or []):
+            start = _parse_dt(jn.get("startDateTime"))
+            arr = _parse_dt(jn.get("arrivalDateTime"))
+            if not start:
+                continue
+            lines = []
+            for lg in (jn.get("legs") or []):
+                ro = (lg.get("routeOptions") or [{}])
+                nm = ro[0].get("name") if ro else None
+                if nm and nm not in lines:
+                    lines.append(nm)
+            out.append({"dt": start, "arr": arr, "duration": jn.get("duration"), "lines": lines})
+        out.sort(key=lambda x: x["dt"])
+        return out
+
     async def _async_update_data(self) -> dict:
         self.update_interval = _get_scan_interval()
         try:
@@ -237,12 +279,8 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                 PAD_GWR,
                 filter_fn=lambda d: any(k in (d.get("destination") or "").lower() for k in TWY_KEYWORDS),
             )
-            # Leg 1: HMM → PAD. The HMM District sensor is filtered to the wrong direction
-            # ("to Ealing Broadway"), so we can't time-match a real eastbound train.
-            # HMM→PAD via Circle/H&C/District runs every few minutes; compute the latest
-            # sensible HMM departure by working back from the PAD→TWY (GWR) train.
-            HMM_FREQ_MINS = 4  # District/Circle frequency at Hammersmith
-
+            # Leg 1: HMM → PAD via the TfL Journey Planner (real Circle/H&C timetabled trains).
+            # For each GWR PAD→TWY departure, find the latest HMM tube that reaches PAD in time.
             trains = []
             for l2 in pad[:NUM_TRAINS]:
                 l2_dt = l2["dt"]
@@ -259,22 +297,52 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                     "transit_mins": TWY_TRANSIT_MINS,
                 }]
 
-                # Latest HMM departure that gets Gail to PAD in time for this GWR train
-                hmm_dep = l2_dt - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS + HMM_PAD_MINS)
-                total = round((l2_dt - hmm_dep).total_seconds() / 60) + TWY_TRANSIT_MINS
+                # Must reach PAD by (GWR departure − interchange). Search HMM journeys
+                # departing in a window before that and pick the latest that arrives in time.
+                must_arrive_pad = l2_dt - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS)
+                search_from = must_arrive_pad - timedelta(minutes=HMM_PAD_MINS + 20)
+                journeys = await self._fetch_journey(
+                    NAPTAN_HAMMERSMITH, NAPTAN_PADDINGTON, search_from
+                )
+                chosen = None
+                for jn in journeys:
+                    if jn.get("arr") and jn["arr"] <= must_arrive_pad:
+                        chosen = jn  # keep latest that still makes it
+                    elif jn.get("arr") and jn["arr"] > must_arrive_pad:
+                        break
+                if chosen is None and journeys:
+                    chosen = journeys[0]
 
-                trains.append({
-                    "time": _hhmm(hmm_dep),
-                    "destination": "Paddington",
-                    "status": "On time",
-                    "delay_minutes": 0,
-                    "platform": None,
-                    "operator": "District / Circle line",
-                    "operator_code": "LU",
-                    "transit_mins": HMM_PAD_MINS,
-                    "total_transit_mins": total,
-                    "leg2": leg2,
-                })
+                if chosen:
+                    line_summary = " + ".join(chosen["lines"]) if chosen["lines"] else "Circle / H&C"
+                    hmm_dt = chosen["dt"]
+                    total = round((l2_dt - hmm_dt).total_seconds() / 60) + TWY_TRANSIT_MINS
+                    trains.append({
+                        "time": _hhmm(hmm_dt),
+                        "destination": f"Paddington ({line_summary})",
+                        "status": "On time",
+                        "delay_minutes": 0,
+                        "platform": None,
+                        "operator": line_summary,
+                        "operator_code": "LU",
+                        "transit_mins": chosen["duration"] if chosen["duration"] else HMM_PAD_MINS,
+                        "total_transit_mins": total,
+                        "leg2": leg2,
+                    })
+                else:
+                    hmm_dep = l2_dt - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS + HMM_PAD_MINS)
+                    trains.append({
+                        "time": _hhmm(hmm_dep),
+                        "destination": "Paddington",
+                        "status": "On time",
+                        "delay_minutes": 0,
+                        "platform": None,
+                        "operator": "Circle / H&C line",
+                        "operator_code": "LU",
+                        "transit_mins": HMM_PAD_MINS,
+                        "total_transit_mins": round((l2_dt - hmm_dep).total_seconds() / 60) + TWY_TRANSIT_MINS,
+                        "leg2": leg2,
+                    })
 
             data = {
                 "summary": {

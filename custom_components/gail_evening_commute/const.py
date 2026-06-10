@@ -54,3 +54,9 @@ HSP_LEGS = [
 ]
 HSP_FROM_TIME = "1600"
 HSP_TO_TIME   = "2000"
+
+# TfL Unified API (Journey Planner) — used for the tube leg with real timetabled connections
+TFL_APP_KEY = "cd8efc356eff48898163e18960ffe5da"
+TFL_JOURNEY_URL = "https://api.tfl.gov.uk/Journey/JourneyResults/{frm}/to/{to}"
+NAPTAN_HAMMERSMITH = "940GZZLUHSD"
+NAPTAN_PADDINGTON = "940GZZLUPAC"
