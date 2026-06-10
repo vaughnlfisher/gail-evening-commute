@@ -237,27 +237,16 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                 PAD_GWR,
                 filter_fn=lambda d: any(k in (d.get("destination") or "").lower() for k in TWY_KEYWORDS),
             )
-            # Leg 1: HMM → PAD (District eastbound) — exclude westbound (Ealing/Richmond)
-            hmm = self._tfl_departures(
-                HMM_DISTRICT,
-                filter_fn=lambda d: not any(
-                    x in (d.get("destination") or "").lower() for x in ("ealing", "richmond")
-                ),
-            )
+            # Leg 1: HMM → PAD. The HMM District sensor is filtered to the wrong direction
+            # ("to Ealing Broadway"), so we can't time-match a real eastbound train.
+            # HMM→PAD via Circle/H&C/District runs every few minutes; compute the latest
+            # sensible HMM departure by working back from the PAD→TWY (GWR) train.
+            HMM_FREQ_MINS = 4  # District/Circle frequency at Hammersmith
 
             trains = []
             for l2 in pad[:NUM_TRAINS]:
                 l2_dt = l2["dt"]
-                # Work back to find HMM District train Gail must catch
-                need_hmm_dep = l2_dt - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS + HMM_PAD_MINS)
-                hmm_train = None
-                for h in reversed(hmm):
-                    if h["dt"] <= need_hmm_dep:
-                        hmm_train = h
-                        break
-                if hmm_train is None and hmm:
-                    hmm_train = hmm[0]
-
+                # Leg 2 is the live, anchored GWR PAD→TWY service
                 leg2 = [{
                     "time": _hhmm(l2_dt),
                     "destination": l2["destination"] or "Twyford",
@@ -270,18 +259,17 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                     "transit_mins": TWY_TRANSIT_MINS,
                 }]
 
-                hmm_dt = hmm_train["dt"] if hmm_train else None
-                total = None
-                if hmm_dt:
-                    total = round((l2_dt - hmm_dt).total_seconds() / 60) + TWY_TRANSIT_MINS
+                # Latest HMM departure that gets Gail to PAD in time for this GWR train
+                hmm_dep = l2_dt - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS + HMM_PAD_MINS)
+                total = round((l2_dt - hmm_dep).total_seconds() / 60) + TWY_TRANSIT_MINS
 
                 trains.append({
-                    "time": _hhmm(hmm_dt) if hmm_dt else "—",
-                    "destination": (hmm_train["destination"] if hmm_train else "Paddington") or "Paddington",
+                    "time": _hhmm(hmm_dep),
+                    "destination": "Paddington",
                     "status": "On time",
                     "delay_minutes": 0,
                     "platform": None,
-                    "operator": "District line",
+                    "operator": "District / Circle line",
                     "operator_code": "LU",
                     "transit_mins": HMM_PAD_MINS,
                     "total_transit_mins": total,
