@@ -2,7 +2,7 @@
 // 3-leg return: CTK->Farringdon (Thameslink) -> Farringdon->Paddington (Elizabeth) -> Paddington->Twyford (GWR/Lizzie)
 // Anchored nesting: each leg shows connections catchable after the previous leg arrives.
 
-const VER = '1.2.0';
+const VER = '1.2.1';
 
 function carrierLabel(opCode, operator) {
   if (!opCode && !operator) return '';
@@ -44,7 +44,7 @@ function statusLabel(status, delay) {
   return '\u2713 On time';
 }
 
-class EveningCommuteMultilegCard extends HTMLElement {
+class GailEveningCommuteCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
@@ -300,7 +300,7 @@ class EveningCommuteMultilegCard extends HTMLElement {
   }
 }
 
-customElements.define('gail-evening-commute-card', EveningCommuteMultilegCard);
+customElements.define('gail-evening-commute-card', GailEveningCommuteCard);
 window.customCards = (window.customCards || []).filter(c => c.type !== 'evening-commute-multileg-card');
 window.customCards.push({
   type: 'evening-commute-multileg-card',
