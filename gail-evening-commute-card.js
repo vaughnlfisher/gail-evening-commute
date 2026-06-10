@@ -1,8 +1,8 @@
-// Gail Evening Commute Card v1.0.0
+// Gail Evening Commute Card v1.2.0
 // 3-leg return: CTK->Farringdon (Thameslink) -> Farringdon->Paddington (Elizabeth) -> Paddington->Twyford (GWR/Lizzie)
 // Anchored nesting: each leg shows connections catchable after the previous leg arrives.
 
-const VER = '1.0.0';
+const VER = '1.2.0';
 
 function carrierLabel(opCode, operator) {
   if (!opCode && !operator) return '';
@@ -71,6 +71,19 @@ class EveningCommuteMultilegCard extends HTMLElement {
   _summary() {
     const s = this._hass.states[this._config.entity];
     return s ? s.attributes : null;
+  }
+
+  _tflDeps(entityId, filterFn) {
+    const s = this._hass?.states[entityId];
+    if (!s?.attributes?.departures) return [];
+    const now = new Date();
+    return s.attributes.departures
+      .filter(d => new Date(d.expected) > now && (!filterFn || filterFn(d)))
+      .sort((a, b) => new Date(a.expected) - new Date(b.expected));
+  }
+
+  _tflTime(dep) {
+    return new Date(dep.expected).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
   }
 
   _styles() {
@@ -203,29 +216,67 @@ class EveningCommuteMultilegCard extends HTMLElement {
         trains.forEach((_, i) => { this._collapsed[i] = (i !== 0); });
         this._collapsedInit = true;
       }
-      blocks = trains.map((t, idx) => {
-        const collapsed = !!this._collapsed[idx];
-        const totalTxt = (t.total_transit_mins !== null && t.total_transit_mins !== undefined)
-          ? `<span class="total-time">\u23f1 ${t.total_transit_mins} min total</span>` : '';
-        const caret = `<span class="caret${collapsed ? '' : ' open'}">\u25bc</span>`;
+      // TfL live sensor for leg1: District from HMM (filter Eastbound = toward Paddington via Earl's Court)
+      // GWR live sensor for leg2: PAD→TWY
+      const hmmDeps = this._tflDeps('sensor.london_tfl_district_940gzzluhsd',
+        d => {
+          const dest = (d.destination || '').toLowerCase();
+          // Eastbound District from HMM goes: Earl's Court → Kensington → Paddington area
+          // Keep: Upminster, Wimbledon (via EC), Edgware Road direction - all pass through relevant stations
+          // Exclude: Ealing Broadway, Richmond (westbound)
+          return !dest.includes('ealing') && !dest.includes('richmond');
+        });
+      const padDeps = this._tflDeps('sensor.london_tfl_great_western_railway_910gpadton',
+        d => {
+          const dest = (d.destination || '').toLowerCase();
+          // Keep services that call at Twyford: Reading, Oxford, Swindon, Bristol, Cardiff, Didcot, Cheltenham, Worcester, Hereford, Gloucester, Bedwyn, Newbury, Maidenhead westbound
+          return dest.includes('reading') || dest.includes('oxford') || dest.includes('swindon') ||
+                 dest.includes('bristol') || dest.includes('cardiff') || dest.includes('didcot') ||
+                 dest.includes('cheltenham') || dest.includes('worcester') || dest.includes('hereford') ||
+                 dest.includes('gloucester') || dest.includes('bedwyn') || dest.includes('newbury') ||
+                 dest.includes('twyford') || dest.includes('great malvern') || dest.includes('westbury') ||
+                 dest.includes('penzance') || dest.includes('plymouth') || dest.includes('taunton') ||
+                 dest.includes('exeter') || dest.includes('weston');
+        });
+      const HMM_TO_PAD_MINS = 15; // HMM→PAD via District ~15 min
 
-        // Leg 1: HMM → PAD (TfL District/Circle — static estimate)
-        const hmmDep = t.hmm_dep_est || '??:??';
-        const leg1bar = `<div class="leg-bar leg1-toggle" data-idx="${idx}"><span class="leg-pill p1">LEG 1</span>Hammersmith \u2192 Paddington \u00b7 District / Circle ${totalTxt}${caret}</div>`;
-        const leg1row = `<div class="row"><span class="dep">${hmmDep}</span><span class="dest">Paddington</span><span style="font-size:.72em;color:#888;margin-left:6px">TfL \u2014 est. ${pInt}m journey</span></div>`;
-        const leg1 = leg1bar + leg1row;
-
-        if (collapsed) {
-          return `<div class="train-block">${leg1}</div>`;
+      if (!padDeps.length) {
+        blocks = '<div class="no-trains">No GWR services from Paddington toward Twyford</div>';
+      } else {
+        if (!this._collapsedInit) {
+          padDeps.slice(0,3).forEach((_, i) => { this._collapsed[i] = (i !== 0); });
+          this._collapsedInit = true;
         }
+        blocks = padDeps.slice(0, 3).map((l2dep, idx) => {
+          const collapsed = !!this._collapsed[idx];
+          const l2dt = new Date(l2dep.expected);
+          const l2time = this._tflTime(l2dep);
+          const l2dest = l2dep.destination || 'Twyford direction';
+          // Work backward to find which HMM train to catch
+          const hmmNeedDepart = new Date(l2dt.getTime() - pInt * 60000 - HMM_TO_PAD_MINS * 60000);
+          const hmmTrain = hmmDeps.find(d => new Date(d.expected) <= hmmNeedDepart) 
+                        || hmmDeps.find(d => new Date(d.expected) <= l2dt);
+          const hmmTime = hmmTrain ? this._tflTime(hmmTrain) : '—';
+          const hmmDest = hmmTrain ? (hmmTrain.destination || 'Paddington direction') : 'District line';
+          const totalMins = hmmTrain
+            ? Math.round((l2dt - new Date(hmmTrain.expected)) / 60000) + 25 // +25 for TWY arrival approx
+            : null;
+          const totalTxt = totalMins ? `<span class="total-time">\u23f1 ${totalMins} min total</span>` : '';
+          const caret = `<span class="caret${collapsed ? '' : ' open'}">\u25bc</span>`;
 
-        // Leg 2: PAD → TWY (live NR)
-        const padDep = t.pad_dep || t.time;
-        const leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${pInt}m interchange at Paddington<span class="line"></span></div>`
-          + `<div class="leg-bar"><span class="leg-pill p2">LEG 2</span>Paddington \u2192 Twyford \u00b7 ${t.operator || 'GWR / Elizabeth'}</div>`
-          + `<div class="l2-wrap">` + this._row(t, 'l2-row') + `</div>`;
+          const leg1row = `<div class="row"><span class="dep">${hmmTime}</span><span class="dest">${hmmDest}</span><span style="font-size:.72em;color:#888;margin-left:6px">~${HMM_TO_PAD_MINS}m to PAD</span></div>`;
+          const leg1 = `<div class="leg-bar leg1-toggle" data-idx="${idx}"><span class="leg-pill p1">LEG 1</span>Hammersmith \u2192 Paddington \u00b7 District line ${totalTxt}${caret}</div>${leg1row}`;
 
-        return `<div class="train-block">${leg1}${leg2html}</div>`;
+          if (collapsed) return `<div class="train-block">${leg1}</div>`;
+
+          const l2row = `<div class="l2-row"><span class="dep">${l2time}</span><span class="dest">${l2dest}</span>${l2dep.line?.designation ? `<span class="plat">Pl ${l2dep.line.designation}</span>` : ''}</div>`;
+          const leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${pInt}m interchange at Paddington<span class="line"></span></div>`
+            + `<div class="leg-bar"><span class="leg-pill p2">LEG 2</span>Paddington \u2192 Twyford \u00b7 GWR</div>`
+            + `<div class="l2-wrap">${l2row}</div>`;
+
+          return `<div class="train-block">${leg1}${leg2html}</div>`;
+        }).join('');
+      }
       }).join('');
     }
 
