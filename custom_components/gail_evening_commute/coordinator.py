@@ -30,6 +30,11 @@ HSP_REFRESH = timedelta(hours=1)
 HMM_DISTRICT = "sensor.london_tfl_district_940gzzluhsd"               # leg1 HMM → PAD
 PAD_GWR      = "sensor.london_tfl_great_western_railway_910gpadton"   # leg2 PAD → TWY
 
+HUXLEY_DEP = (
+    "https://huxley2.azurewebsites.net/departures/{frm}/to/{to}/{rows}"
+    "?expand=true&accessToken={token}"
+)
+
 HMM_PAD_MINS = 15   # HMM → PAD via District/Circle
 TWY_TRANSIT_MINS = 25  # PAD → TWY on GWR
 
@@ -231,6 +236,31 @@ class GailEveningCoordinator(DataUpdateCoordinator):
         return out
 
 
+
+    @staticmethod
+    def _extract_calling_points(svc):
+        """Extract calling point names from Huxley subsequentCallingPoints."""
+        scp = svc.get("subsequentCallingPoints")
+        if not scp or not isinstance(scp, list):
+            return []
+        pts = scp[0].get("callingPoint", []) if isinstance(scp[0], dict) else []
+        return [p.get("locationName", "") for p in pts if p.get("locationName")]
+
+    async def _fetch_huxley(self, frm, to):
+        """Fetch departures from Huxley (Darwin) for full train detail."""
+        from .const import DARWIN_TOKEN
+        url = HUXLEY_DEP.format(frm=frm, to=to, rows=25, token=DARWIN_TOKEN)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json(content_type=None)
+                    return data.get("trainServices") or []
+        except Exception as err:
+            _LOGGER.warning("Huxley %s->%s error: %s", frm, to, err)
+            return []
+
     async def _fetch_journey(self, frm, to, depart_dt):
         """TfL Journey Planner: real timetabled tube connections from depart_dt onward."""
         url = TFL_JOURNEY_URL.format(frm=frm, to=to)
@@ -274,11 +304,55 @@ class GailEveningCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         self.update_interval = _get_scan_interval()
         try:
-            # Leg 2 anchor: PAD → TWY (GWR) — only services that call at Twyford
-            pad = self._tfl_departures(
-                PAD_GWR,
-                filter_fn=lambda d: any(k in (d.get("destination") or "").lower() for k in TWY_KEYWORDS),
-            )
+            # Leg 2 anchor: PAD → TWY via Huxley (Darwin) for full train detail.
+            pad_raw = await self._fetch_huxley("PAD", "TWY")
+            now_local = datetime.now().astimezone()
+            pad = []
+            for svc in pad_raw:
+                std = (svc.get("std") or "").strip()
+                if not std or std in ("Delayed", "Cancelled"):
+                    continue
+                dest = svc.get("destination") or []
+                dest_name = dest[0].get("locationName", "") if isinstance(dest, list) and dest else str(dest)
+                try:
+                    h, m = map(int, std.split(":"))
+                    dt = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+                    if (dt - now_local).total_seconds() < -3600:
+                        dt += timedelta(days=1)
+                    if dt < now_local:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                etd = (svc.get("etd") or "").strip()
+                if etd == "Cancelled":
+                    status, delay = "Cancelled", None
+                elif etd in ("On time", ""):
+                    status, delay = "On time", 0
+                elif etd == "Delayed":
+                    status, delay = "Delayed", None
+                else:
+                    try:
+                        eh, em = map(int, etd.split(":"))
+                        sh, sm = map(int, std.split(":"))
+                        d = (eh * 60 + em) - (sh * 60 + sm)
+                        if d < 0: d += 1440
+                        status = "On time" if d == 0 else "Delayed"
+                        delay = d
+                    except (ValueError, TypeError):
+                        status, delay = "On time", 0
+                pad.append({
+                    "dt": dt,
+                    "destination": dest_name,
+                    "status": status,
+                    "delay_minutes": delay,
+                    "platform": svc.get("platform"),
+                    "operator": svc.get("operator"),
+                    "operator_code": svc.get("operatorCode"),
+                    "calling_points": self._extract_calling_points(svc),
+                    "delay_reason": svc.get("delayReason"),
+                    "cancel_reason": svc.get("cancelReason"),
+                })
+            pad.sort(key=lambda x: x["dt"])
             # Leg 1: HMM → PAD via the TfL Journey Planner (real Circle/H&C timetabled trains).
             # For each GWR PAD→TWY departure, find the latest HMM tube that reaches PAD in time.
             trains = []
@@ -287,12 +361,14 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                 # Leg 2 is the live, anchored GWR PAD→TWY service
                 leg2 = [{
                     "time": _hhmm(l2_dt),
-                    "destination": l2["destination"] or "Twyford",
-                    "status": "On time",
-                    "delay_minutes": 0,
-                    "platform": None,
-                    "operator": "Great Western Railway",
-                    "operator_code": "GW",
+                    "destination": l2.get("destination") or "Twyford",
+                    "status": l2.get("status", "On time"),
+                    "delay_minutes": l2.get("delay_minutes", 0),
+                    "platform": l2.get("platform"),
+                    "operator": l2.get("operator", "Great Western Railway"),
+                    "operator_code": l2.get("operator_code", "GW"),
+                    "calling_points": l2.get("calling_points", []),
+                    "delay_reason": l2.get("delay_reason"),
                     "wait_mins": PADDINGTON_INTERCHANGE_MINS,
                     "transit_mins": TWY_TRANSIT_MINS,
                 }]
