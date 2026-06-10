@@ -1,9 +1,13 @@
-"""Coordinator for Gail Evening Commute (Hammersmith → Paddington → Twyford)."""
+"""Coordinator for Gail Evening Commute (Hammersmith → Paddington → Twyford).
+
+Reads London TfL integration sensors directly and builds the trains[].leg2[]
+schema the multileg card expects. Anchored on the PAD→TWY (GWR) departure.
+"""
 from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
@@ -12,11 +16,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
-    DOMAIN, DARWIN_TOKEN,
-    LEG1_FROM, LEG1_TO, LEG2_FROM, LEG2_TO,
-    PADDINGTON_INTERCHANGE_MINS, NUM_TRAINS, MAX_LEG2,
+    DOMAIN, NUM_TRAINS, MAX_LEG2,
     SCAN_INTERVAL_PEAK, SCAN_INTERVAL_OFFPEAK, SCAN_INTERVAL_NIGHT,
-    HUXLEY_ROWS, PADDINGTON_TERMINI, TWYFORD_TERMINI,
+    PADDINGTON_INTERCHANGE_MINS,
     HSP_URL, HSP_USERNAME, HSP_PASSWORD, HSP_LEGS, HSP_FROM_TIME, HSP_TO_TIME,
     LEG1_HISTORY_PROXY_ENTITY,
 )
@@ -24,9 +26,17 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 HSP_REFRESH = timedelta(hours=1)
 
-HUXLEY_DEP = (
-    "https://huxley2.azurewebsites.net/departures/{frm}/to/{to}/{rows}"
-    "?expand=true&accessToken={token}"
+HMM_DISTRICT = "sensor.london_tfl_district_940gzzluhsd"               # leg1 HMM → PAD
+PAD_GWR      = "sensor.london_tfl_great_western_railway_910gpadton"   # leg2 PAD → TWY
+
+HMM_PAD_MINS = 15   # HMM → PAD via District/Circle
+TWY_TRANSIT_MINS = 25  # PAD → TWY on GWR
+
+TWY_KEYWORDS = (
+    "reading", "oxford", "swindon", "bristol", "cardiff", "didcot",
+    "cheltenham", "worcester", "hereford", "gloucester", "bedwyn",
+    "newbury", "twyford", "westbury", "penzance", "plymouth", "taunton",
+    "exeter", "weston", "great malvern", "maidenhead", "slough",
 )
 
 
@@ -39,115 +49,21 @@ def _get_scan_interval() -> timedelta:
     return timedelta(seconds=SCAN_INTERVAL_OFFPEAK)
 
 
-def _parse_hhmm_after(val, ref):
+def _parse_dt(val):
+    if not val:
+        return None
     try:
-        h, m = map(int, val.split(":"))
-        dt = ref.replace(hour=h, minute=m, second=0, microsecond=0)
-        if (dt - ref).total_seconds() < -3600:
-            dt += timedelta(days=1)
+        s = str(val).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError):
         return None
 
 
-def _svc_dest(svc):
-    dest = svc.get("destination") or []
-    if isinstance(dest, list) and dest:
-        return dest[0].get("locationName", "")
-    return str(dest)
-
-
-def _svc_time(svc):
-    now = datetime.now().astimezone()
-    for key in ("etd", "std"):
-        val = (svc.get(key) or "").strip()
-        if val in ("", "Delayed", "Cancelled", "On time"):
-            continue
-        try:
-            h, m = map(int, val.split(":"))
-            dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            if (dt - now).total_seconds() < -3600:
-                dt += timedelta(days=1)
-            return dt
-        except (ValueError, TypeError):
-            continue
-    std = (svc.get("std") or "").strip()
-    if std:
-        try:
-            h, m = map(int, std.split(":"))
-            dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            if (dt - now).total_seconds() < -3600:
-                dt += timedelta(days=1)
-            return dt
-        except (ValueError, TypeError):
-            pass
-    return None
-
-
-def _svc_status(svc):
-    etd = (svc.get("etd") or "").strip()
-    if etd == "Cancelled":
-        return "Cancelled", None
-    if etd in ("On time", ""):
-        return "On time", 0
-    if etd == "Delayed":
-        return "Delayed", None
-    std = (svc.get("std") or "").strip()
-    try:
-        eh, em = map(int, etd.split(":"))
-        sh, sm = map(int, std.split(":"))
-        delay = (eh * 60 + em) - (sh * 60 + sm)
-        if delay < 0:
-            delay += 1440
-        return ("On time" if delay == 0 else "Delayed"), delay
-    except (ValueError, TypeError):
-        return "On time", 0
-
-
-def _arrival_at(svc, dest_names, dep_dt):
-    scp = svc.get("subsequentCallingPoints")
-    if not scp or not isinstance(scp, list):
-        return None, None
-    pts = scp[0].get("callingPoint", []) if isinstance(scp[0], dict) else []
-    for p in pts:
-        name = (p.get("locationName") or "").lower()
-        if any(d in name for d in dest_names):
-            t = (p.get("et") or "").strip()
-            if t in ("", "On time", "Delayed", "Cancelled"):
-                t = (p.get("st") or "").strip()
-            arr_dt = _parse_hhmm_after(t, dep_dt)
-            if arr_dt:
-                transit = max(0, round((arr_dt - dep_dt).total_seconds() / 60))
-                return arr_dt, transit
-            break
-    return None, None
-
-
-def _is_to(svc, termini):
-    dest = _svc_dest(svc).lower()
-    return any(kw in dest for kw in termini)
-
-
-def _upcoming(services, after_dt, termini=None):
-    out = []
-    for svc in services:
-        if termini and not _is_to(svc, termini):
-            continue
-        dt = _svc_time(svc)
-        if not dt or dt < after_dt:
-            continue
-        status, delay = _svc_status(svc)
-        out.append({
-            "dt": dt, "time": dt.strftime("%H:%M"),
-            "destination": _svc_dest(svc),
-            "status": status, "delay_minutes": delay,
-            "platform": svc.get("platform"),
-            "operator": svc.get("operator"),
-            "operator_code": svc.get("operatorCode"),
-            "_svc": svc,
-        })
-    out.sort(key=lambda x: x["dt"])
-    return out
+def _hhmm(dt):
+    return dt.astimezone().strftime("%H:%M") if dt else None
 
 
 class GailEveningCoordinator(DataUpdateCoordinator):
@@ -167,7 +83,6 @@ class GailEveningCoordinator(DataUpdateCoordinator):
     async def _async_hsp_fetch(self) -> None:
         import asyncio as _aio
         await _aio.sleep(30)
-        _LOGGER.warning("HSP: Gail evening fetch starting")
         try:
             result = await self._fetch_all_history()
             if result:
@@ -196,9 +111,7 @@ class GailEveningCoordinator(DataUpdateCoordinator):
         headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
 
         out = {}
-
-        # leg2 (PAD→TWY): real NR HSP
-        for leg in HSP_LEGS:
+        for leg in HSP_LEGS:  # leg2 PAD→TWY (real NR HSP)
             payload = {
                 "from_loc": leg["from"], "to_loc": leg["to"],
                 "from_time": HSP_FROM_TIME, "to_time": HSP_TO_TIME,
@@ -213,8 +126,6 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as resp:
                         if resp.status != 200:
-                            body = await resp.text()
-                            _LOGGER.warning("HSP %s HTTP %s: %s", leg["key"], resp.status, body[:200])
                             continue
                         data = await resp.json(content_type=None)
                         services = data.get("Services", [])
@@ -226,7 +137,7 @@ class GailEveningCoordinator(DataUpdateCoordinator):
                 parsed["label"] = leg["label"]
                 out[leg["key"]] = parsed
 
-        # leg1 (HMM→PAD): District/Circle (TfL) — proxy
+        # leg1 HMM→PAD: District (TfL) — proxy
         try:
             s = self.hass.states.get(LEG1_HISTORY_PROXY_ENTITY)
             if s and s.state not in (None, "unknown", "unavailable", ""):
@@ -302,113 +213,97 @@ class GailEveningCoordinator(DataUpdateCoordinator):
             "worst_day": worst,
         }
 
-    async def _fetch_leg(self, frm: str, to: str) -> list[dict]:
-        url = HUXLEY_DEP.format(frm=frm, to=to, rows=HUXLEY_ROWS, token=DARWIN_TOKEN)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
-                    if resp.status != 200:
-                        return []
-                    data = await resp.json(content_type=None)
-                    return data.get("trainServices") or []
-        except Exception as err:
-            _LOGGER.warning("Huxley %s->%s error: %s", frm, to, err)
+    def _tfl_departures(self, entity_id, filter_fn=None):
+        s = self.hass.states.get(entity_id)
+        if not s or "departures" not in s.attributes:
             return []
+        now = datetime.now(timezone.utc)
+        out = []
+        for d in s.attributes["departures"]:
+            dt = _parse_dt(d.get("expected"))
+            if not dt or dt <= now:
+                continue
+            if filter_fn and not filter_fn(d):
+                continue
+            out.append({"dt": dt, "destination": d.get("destination", "")})
+        out.sort(key=lambda x: x["dt"])
+        return out
 
     async def _async_update_data(self) -> dict:
         self.update_interval = _get_scan_interval()
         try:
-            now = datetime.now().astimezone()
+            # Leg 2 anchor: PAD → TWY (GWR) — only services that call at Twyford
+            pad = self._tfl_departures(
+                PAD_GWR,
+                filter_fn=lambda d: any(k in (d.get("destination") or "").lower() for k in TWY_KEYWORDS),
+            )
+            # Leg 1: HMM → PAD (District eastbound) — exclude westbound (Ealing/Richmond)
+            hmm = self._tfl_departures(
+                HMM_DISTRICT,
+                filter_fn=lambda d: not any(
+                    x in (d.get("destination") or "").lower() for x in ("ealing", "richmond")
+                ),
+            )
 
-            # leg1 (HMM→PAD) is District/Circle TfL — not in Darwin.
-            # Gail catches a District/Circle from Hammersmith independently.
-            # We show PAD→TWY trains directly; HMM→PAD is ~15 min + 8 min interchange = 23 min offset.
-            HMM_TO_PAD_MINS = 15
-            PAD_BOARD_OFFSET = HMM_TO_PAD_MINS + PADDINGTON_INTERCHANGE_MINS  # 23 min
-
-            # Fetch PAD departures towards Twyford (GWR westbound + Elizabeth line westbound)
-            pad_twy_services = await self._fetch_leg("PAD", "TWY")
-            pad_eal_services = await self._fetch_leg("PAD", "EAL")
-
-            # Combine and deduplicate by std
-            all_pad_services = {s.get("std"): s for s in (pad_twy_services + pad_eal_services)
-                                 if s.get("std")}.values()
-
-            # Filter to services that call at Twyford
-            twy_services = []
-            for svc in all_pad_services:
-                if not _is_to(svc, TWYFORD_TERMINI):
-                    continue
-                dt = _svc_time(svc)
-                if not dt:
-                    continue
-                status, delay = _svc_status(svc)
-                _, transit = _arrival_at(svc, ["twyford"], dt)
-                if transit is None:
-                    transit = 25
-                twy_services.append({
-                    "dt": dt, "time": dt.strftime("%H:%M"),
-                    "destination": _svc_dest(svc),
-                    "status": status, "delay_minutes": delay,
-                    "platform": svc.get("platform"),
-                    "operator": svc.get("operator"),
-                    "operator_code": svc.get("operatorCode"),
-                    "transit_mins": transit,
-                    "_svc": svc,
-                })
-            twy_services.sort(key=lambda x: x["dt"])
-
-            # Build trains: each PAD→TWY departure becomes a "train"
-            # HMM→PAD leg shown as static note (TfL District/Circle, ~15 min)
             trains = []
-            for svc in twy_services[:NUM_TRAINS]:
-                pad_arr_est = svc["dt"] - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS)
-                hmm_dep_est = pad_arr_est - timedelta(minutes=HMM_TO_PAD_MINS)
-                total_transit = HMM_TO_PAD_MINS + PADDINGTON_INTERCHANGE_MINS + svc["transit_mins"]
+            for l2 in pad[:NUM_TRAINS]:
+                l2_dt = l2["dt"]
+                # Work back to find HMM District train Gail must catch
+                need_hmm_dep = l2_dt - timedelta(minutes=PADDINGTON_INTERCHANGE_MINS + HMM_PAD_MINS)
+                hmm_train = None
+                for h in reversed(hmm):
+                    if h["dt"] <= need_hmm_dep:
+                        hmm_train = h
+                        break
+                if hmm_train is None and hmm:
+                    hmm_train = hmm[0]
 
-                leg1_opts = [{
-                    "time": hmm_dep_est.strftime("%H:%M"),
-                    "destination": "Paddington",
-                    "status": "TfL",
-                    "delay_minutes": None,
+                leg2 = [{
+                    "time": _hhmm(l2_dt),
+                    "destination": l2["destination"] or "Twyford",
+                    "status": "On time",
+                    "delay_minutes": 0,
                     "platform": None,
-                    "operator": "District / Circle line",
-                    "operator_code": "LU",
-                    "transit_mins": HMM_TO_PAD_MINS,
-                    "tfl_static": True,
+                    "operator": "Great Western Railway",
+                    "operator_code": "GW",
+                    "wait_mins": PADDINGTON_INTERCHANGE_MINS,
+                    "transit_mins": TWY_TRANSIT_MINS,
                 }]
 
+                hmm_dt = hmm_train["dt"] if hmm_train else None
+                total = None
+                if hmm_dt:
+                    total = round((l2_dt - hmm_dt).total_seconds() / 60) + TWY_TRANSIT_MINS
+
                 trains.append({
-                    "time": svc["time"],
-                    "pad_dep": svc["time"],
-                    "destination": svc["destination"],
-                    "status": svc["status"],
-                    "delay_minutes": svc["delay_minutes"],
-                    "platform": svc["platform"],
-                    "operator": svc["operator"],
-                    "operator_code": svc["operator_code"],
-                    "transit_mins": svc["transit_mins"],
-                    "total_transit_mins": total_transit,
-                    "hmm_dep_est": hmm_dep_est.strftime("%H:%M"),
-                    "leg1": leg1_opts,
+                    "time": _hhmm(hmm_dt) if hmm_dt else "—",
+                    "destination": (hmm_train["destination"] if hmm_train else "Paddington") or "Paddington",
+                    "status": "On time",
+                    "delay_minutes": 0,
+                    "platform": None,
+                    "operator": "District line",
+                    "operator_code": "LU",
+                    "transit_mins": HMM_PAD_MINS,
+                    "total_transit_mins": total,
+                    "leg2": leg2,
                 })
 
             data = {
                 "summary": {
-                    "state": trains[0]["hmm_dep_est"] if trains else "No service",
+                    "state": trains[0]["time"] if trains else "No service",
                     "leg1_from": "HMM",
                     "leg1_to": "PAD",
                     "leg2_to": "TWY",
                     "paddington_interchange_mins": PADDINGTON_INTERCHANGE_MINS,
-                    "hmm_to_pad_mins": HMM_TO_PAD_MINS,
+                    "farringdon_interchange_mins": PADDINGTON_INTERCHANGE_MINS,
                     "trains": trains,
-                    "last_updated": now.isoformat(),
+                    "last_updated": datetime.now().astimezone().isoformat(),
                     "history": self._history,
                 },
                 "history": self._history,
             }
             for i, t in enumerate(trains, 1):
-                data[f"train_{i}"] = {"state": t["hmm_dep_est"], **t}
+                data[f"train_{i}"] = {"state": t["time"], **t}
             return data
 
         except Exception as err:
