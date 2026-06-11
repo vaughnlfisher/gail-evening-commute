@@ -1,7 +1,7 @@
-// Gail Evening Commute Card v2.2.0
+// Gail Evening Commute Card v2.2.1
 // 2-leg: Hammersmith->Paddington (District) -> Paddington->Twyford (GWR)
 
-const VER = '2.2.0';
+const VER = '2.2.1';
 
 function carrierLabel(opCode, operator) {
   if (!opCode && !operator) return '';
@@ -92,7 +92,7 @@ class GailEveningCommuteCard extends HTMLElement {
       .p1{background:#007D32}   /* Thameslink red (deepened for contrast) */
       .p2{background:#0A493E}   /* Elizabeth line purple */
       .p3{background:#0A493E}   /* GWR dark green */
-      .row{padding:8px 16px}
+      .row{padding:8px 16px;background:rgba(0,125,50,0.08);border-left:3px solid #007D32}
       .row .top{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
       .time{font-size:1.2em;font-weight:700;color:var(--primary-text-color);flex-shrink:0}
       .meta{display:flex;align-items:center;gap:8px;flex:1;flex-wrap:wrap;font-size:.8em;color:var(--secondary-text-color)}
@@ -101,9 +101,9 @@ class GailEveningCommuteCard extends HTMLElement {
       .sub{font-size:.78em;color:var(--secondary-text-color);margin-top:2px}
       .interchange{display:flex;align-items:center;gap:8px;padding:4px 16px;font-size:.72em;color:var(--secondary-text-color);font-style:italic}
       .interchange .line{flex:1;border-top:1px dashed var(--divider-color,rgba(0,0,0,.2))}
-      .l2-wrap{margin-left:14px;border-left:3px solid #9364CC;padding-left:0}
+      .l2-wrap{margin-left:14px;border-left:3px solid #0A493E;padding-left:0;background:rgba(10,73,62,0.08)}
       .l3-wrap{margin-left:14px;border-left:3px solid #0A493E;padding-left:0}
-      .l2-row{padding:6px 16px}
+      .l2-row{padding:6px 16px;background:rgba(10,73,62,0.08);border-left:none}
       .l3-row{padding:5px 16px;font-size:.95em}
       .none{padding:6px 16px;font-size:.76em;color:var(--secondary-text-color);font-style:italic}
       .footer{padding:5px 16px;font-size:.74em;color:var(--secondary-text-color);border-top:1px solid var(--divider-color,rgba(0,0,0,.08));display:flex;justify-content:space-between}
