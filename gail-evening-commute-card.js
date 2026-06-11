@@ -1,7 +1,7 @@
-// Gail Evening Commute Card v2.2.1
+// Gail Evening Commute Card v2.2.2
 // 2-leg: Hammersmith->Paddington (District) -> Paddington->Twyford (GWR)
 
-const VER = '2.2.1';
+const VER = '2.2.2';
 
 function carrierLabel(opCode, operator) {
   if (!opCode && !operator) return '';
@@ -9,6 +9,10 @@ function carrierLabel(opCode, operator) {
   if (c === 'XR' || (operator || '').toLowerCase().includes('elizabeth')) return 'Elizabeth line';
   if (c === 'GW' || (operator || '').toLowerCase().includes('great western')) return 'GWR';
   return operator || c;
+}
+function hexToRgba(hex, a) {
+  const h = hex.replace('#','');
+  return `rgba(${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)},${a})`;
 }
 function carrierColor(opCode, operator) {
   const c = (opCode || '').toUpperCase();
@@ -101,9 +105,9 @@ class GailEveningCommuteCard extends HTMLElement {
       .sub{font-size:.78em;color:var(--secondary-text-color);margin-top:2px}
       .interchange{display:flex;align-items:center;gap:8px;padding:4px 16px;font-size:.72em;color:var(--secondary-text-color);font-style:italic}
       .interchange .line{flex:1;border-top:1px dashed var(--divider-color,rgba(0,0,0,.2))}
-      .l2-wrap{margin-left:14px;border-left:3px solid #0A493E;padding-left:0;background:rgba(10,73,62,0.08)}
+      .l2-wrap{margin-left:14px;border-left:3px solid #0A493E;padding-left:0;}
       .l3-wrap{margin-left:14px;border-left:3px solid #0A493E;padding-left:0}
-      .l2-row{padding:6px 16px;background:rgba(10,73,62,0.08);border-left:none}
+      .l2-row{padding:6px 16px;}
       .l3-row{padding:5px 16px;font-size:.95em}
       .none{padding:6px 16px;font-size:.76em;color:var(--secondary-text-color);font-style:italic}
       .footer{padding:5px 16px;font-size:.74em;color:var(--secondary-text-color);border-top:1px solid var(--divider-color,rgba(0,0,0,.08));display:flex;justify-content:space-between}
@@ -145,7 +149,8 @@ class GailEveningCommuteCard extends HTMLElement {
     const delayHtml = item.delay_reason ? `<div class="delay-reason">\u26a0 ${item.delay_reason}</div>` : '';
     const cancelHtml = item.cancel_reason ? `<div class="delay-reason">\u2715 ${item.cancel_reason}</div>` : '';
     const opHtml = item.operator ? `<div class="operator">${item.operator}</div>` : '';
-    return `<div class="row ${cls}">
+    const rowBg = carrierColor(item.operator_code, item.operator);
+    return `<div class="row ${cls}" style="background:${hexToRgba(rowBg, 0.08)};border-left:3px solid ${hexToRgba(rowBg, 0.3)}">
       <div class="top">
         <span class="time" style="color:${color}">${item.time}</span>
         <div class="meta">${carrierBadge}${plat}${waitTxt ? `<span>${waitTxt}</span>` : ''}</div>
@@ -226,7 +231,7 @@ class GailEveningCommuteCard extends HTMLElement {
           leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${fInt}m interchange<span class="line"></span></div><div class="l2-wrap"><div class="none">No onward Twyford service yet</div></div>`;
         } else {
           leg2html = `<div class="interchange"><span class="line"></span>\ud83d\udeb6 ${fInt}m interchange at Paddington<span class="line"></span></div>`
-            + `<div class="leg-bar"><span class="leg-pill p2">LEG 2</span>Paddington \u2192 Twyford \u00b7 GWR</div>`
+            + `<div class="leg-bar"><span class="leg-pill p2">LEG 2</span>Paddington \u2192 Twyford</div>`
             + `<div class="l2-wrap">` + leg2list.map(l2 => this._row(l2, 'l2-row', {carrier: true})).join('') + `</div>`;
         }
         return `<div class="train-block">${leg1}${leg2html}</div>`;
