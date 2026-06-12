@@ -19,9 +19,18 @@ function hexToSolid(hex, mix) {
 }
 function carrierColor(opCode, operator) {
   const c = (opCode || '').toUpperCase();
-  if (c === 'XR' || (operator || '').toLowerCase().includes('elizabeth')) return '#9364CC';
-  if (c === 'GW' || (operator || '').toLowerCase().includes('great western')) return '#0A493E';
-  return '#666';
+  const o = (operator || '').toLowerCase();
+  if (c === 'XR' || o.includes('elizabeth')) return '#9364CC';
+  if (c === 'GW' || o.includes('great western')) return '#0A493E';
+  if (c === 'TL' || o.includes('thameslink')) return '#B30D24';
+  if (c === 'SE' || o.includes('southeastern')) return '#003688';
+  if (o.includes('district')) return '#007D32';
+  if (o.includes('piccadilly')) return '#0019A8';
+  if (o.includes('circle')) return '#FFD300';
+  if (o.includes('hammersmith')) return '#F3A9BB';
+  if (o.includes('metropolitan')) return '#9B0056';
+  if (c === 'LU') return '#007D32';
+  return '#4A6FA5';
 }
 function pctColor(p) {
   if (p === null || p === undefined) return 'var(--secondary-text-color)';
